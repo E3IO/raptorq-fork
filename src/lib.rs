@@ -30,6 +30,7 @@ mod pi_solver;
 mod python;
 mod reduced;
 #[cfg(test)] mod perf_test;
+#[cfg(test)] mod recovery_test;
 mod rng;
 mod sparse_matrix;
 mod sparse_vec;
