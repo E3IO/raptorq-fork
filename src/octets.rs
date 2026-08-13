@@ -350,25 +350,31 @@ unsafe fn mulassign_scalar_avx2(octets: &mut [u8], scalar: &Octet) {
     let hi_table =
         _mm256_loadu_si256(OCTET_MUL_HI_BITS[scalar.byte() as usize].as_ptr() as *const __m256i);
 
-    for i in 0..(octets.len() / 32) {
-        #[allow(clippy::cast_ptr_alignment)]
-        let self_vec = _mm256_loadu_si256((self_avx_ptr as *const __m256i).add(i));
-        let low = _mm256_and_si256(self_vec, low_mask);
-        let low_result = _mm256_shuffle_epi8(low_table, low);
-        let hi = _mm256_and_si256(self_vec, hi_mask);
-        let hi = _mm256_srli_epi64(hi, 4);
-        let hi_result = _mm256_shuffle_epi8(hi_table, hi);
-        let result = _mm256_xor_si256(hi_result, low_result);
-        #[allow(clippy::cast_ptr_alignment)]
-        _mm256_storeu_si256((self_avx_ptr as *mut __m256i).add(i), result);
+    let n = octets.len();
+    let main = n - (n % 128);
+    let mut i = 0usize;
+    while i < main {
+        // Four independent 32-byte lanes hide the vpshufb latency chain.
+        for lane in 0..4 {
+            #[allow(clippy::cast_ptr_alignment)]
+            let self_vec = _mm256_loadu_si256((self_avx_ptr as *const __m256i).add(i / 32 + lane));
+            let low = _mm256_and_si256(self_vec, low_mask);
+            let low_result = _mm256_shuffle_epi8(low_table, low);
+            let hi = _mm256_and_si256(self_vec, hi_mask);
+            let hi = _mm256_srli_epi64(hi, 4);
+            let hi_result = _mm256_shuffle_epi8(hi_table, hi);
+            let result = _mm256_xor_si256(hi_result, low_result);
+            #[allow(clippy::cast_ptr_alignment)]
+            _mm256_storeu_si256((self_avx_ptr as *mut __m256i).add(i / 32 + lane), result);
+        }
+        i += 128;
     }
 
-    let remainder = octets.len() % 32;
     let scalar_index = scalar.byte() as usize;
-    for i in (octets.len() - remainder)..octets.len() {
-        *octets.get_unchecked_mut(i) = *OCTET_MUL
+    for j in main..n {
+        *octets.get_unchecked_mut(j) = *OCTET_MUL
             .get_unchecked(scalar_index)
-            .get_unchecked(*octets.get_unchecked(i) as usize);
+            .get_unchecked(*octets.get_unchecked(j) as usize);
     }
 }
 
@@ -515,8 +521,6 @@ unsafe fn fused_addassign_mul_scalar_avx2(octets: &mut [u8], other: &[u8], scala
 
     let low_mask = _mm256_set1_epi8(0x0F);
     let hi_mask = _mm256_set1_epi8(0xF0u8 as i8);
-    let self_avx_ptr = octets.as_mut_ptr();
-    let other_avx_ptr = other.as_ptr();
     // Safe because _mm256_loadu_si256 loads from unaligned memory
     #[allow(clippy::cast_ptr_alignment)]
     let low_table =
@@ -526,32 +530,41 @@ unsafe fn fused_addassign_mul_scalar_avx2(octets: &mut [u8], other: &[u8], scala
     let hi_table =
         _mm256_loadu_si256(OCTET_MUL_HI_BITS[scalar.byte() as usize].as_ptr() as *const __m256i);
 
-    for i in 0..(octets.len() / 32) {
-        // Multiply by scalar
-        #[allow(clippy::cast_ptr_alignment)]
-        let other_vec = _mm256_loadu_si256((other_avx_ptr as *const __m256i).add(i));
-        let low = _mm256_and_si256(other_vec, low_mask);
-        let low_result = _mm256_shuffle_epi8(low_table, low);
-        let hi = _mm256_and_si256(other_vec, hi_mask);
-        let hi = _mm256_srli_epi64(hi, 4);
-        let hi_result = _mm256_shuffle_epi8(hi_table, hi);
-        let other_vec = _mm256_xor_si256(hi_result, low_result);
-
-        // Add to self
-        #[allow(clippy::cast_ptr_alignment)]
-        let self_vec = _mm256_loadu_si256((self_avx_ptr as *const __m256i).add(i));
-        let result = _mm256_xor_si256(self_vec, other_vec);
-        #[allow(clippy::cast_ptr_alignment)]
-        _mm256_storeu_si256((self_avx_ptr as *mut __m256i).add(i), result);
+    let n = octets.len();
+    let main = n - (n % 128);
+    let mut i = 0usize;
+    while i < main {
+        // Four independent 32-byte lanes hide the vpshufb latency chain
+        // (load -> and -> shuffle -> and -> shift -> shuffle -> xor -> xor),
+        // which the single-lane loop exposed on every 32-byte chunk.
+        for lane in 0..4 {
+            let off = i + lane * 32;
+            #[allow(clippy::cast_ptr_alignment)]
+            let other_vec = _mm256_loadu_si256((other.as_ptr() as *const __m256i).add(i / 32 + lane));
+            let low = _mm256_and_si256(other_vec, low_mask);
+            let low_result = _mm256_shuffle_epi8(low_table, low);
+            let hi = _mm256_and_si256(other_vec, hi_mask);
+            let hi = _mm256_srli_epi64(hi, 4);
+            let hi_result = _mm256_shuffle_epi8(hi_table, hi);
+            let product = _mm256_xor_si256(hi_result, low_result);
+            #[allow(clippy::cast_ptr_alignment)]
+            let self_vec = _mm256_loadu_si256((octets.as_ptr() as *const __m256i).add(i / 32 + lane));
+            let result = _mm256_xor_si256(self_vec, product);
+            #[allow(clippy::cast_ptr_alignment)]
+            _mm256_storeu_si256((octets.as_mut_ptr() as *mut __m256i).add(i / 32 + lane), result);
+            let _ = off;
+        }
+        i += 128;
     }
 
-    let remainder = octets.len() % 32;
+    let remainder = n - main;
     let scalar_index = scalar.byte() as usize;
-    for i in (octets.len() - remainder)..octets.len() {
-        *octets.get_unchecked_mut(i) ^= *OCTET_MUL
+    for j in main..n {
+        *octets.get_unchecked_mut(j) ^= *OCTET_MUL
             .get_unchecked(scalar_index)
-            .get_unchecked(*other.get_unchecked(i) as usize);
+            .get_unchecked(*other.get_unchecked(j) as usize);
     }
+    let _ = remainder;
 }
 
 #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "std"))]
