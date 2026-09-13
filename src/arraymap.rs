@@ -27,6 +27,8 @@ impl ImmutableListMap {
         &self.values[start..end]
     }
 
+    // Memory accounting hook; see BinaryMatrix::size_in_bytes.
+    #[allow(dead_code)]
     pub fn size_in_bytes(&self) -> usize {
         let mut bytes = size_of::<Self>();
         bytes += size_of::<u32>() * self.offsets.len();

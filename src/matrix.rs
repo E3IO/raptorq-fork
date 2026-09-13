@@ -23,12 +23,15 @@ pub trait BinaryMatrix: Clone {
 
     fn width(&self) -> usize;
 
+    // Memory accounting hook; kept as part of the matrix API for diagnostics
+    // even when no in-tree caller exercises it.
+    #[allow(dead_code)]
     fn size_in_bytes(&self) -> usize;
 
     fn count_ones(&self, row: usize, start_col: usize, end_col: usize) -> usize;
 
     // Once "impl Trait" is supported in traits, it would be better to return "impl Iterator<...>"
-    fn get_row_iter(&self, row: usize, start_col: usize, end_col: usize) -> OctetIter;
+    fn get_row_iter(&self, row: usize, start_col: usize, end_col: usize) -> OctetIter<'_>;
 
     // An iterator over rows with a 1-valued entry for the given col
     fn get_ones_in_column(&self, col: usize, start_row: usize, end_row: usize) -> Vec<u32>;
@@ -176,7 +179,7 @@ impl BinaryMatrix for DenseBinaryMatrix {
         return ones as usize;
     }
 
-    fn get_row_iter(&self, row: usize, start_col: usize, end_col: usize) -> OctetIter {
+    fn get_row_iter(&self, row: usize, start_col: usize, end_col: usize) -> OctetIter<'_> {
         let (first_word, first_bit) = self.bit_position(row, start_col);
         let (last_word, _) = self.bit_position(row, end_col);
         OctetIter::new_dense_binary(
